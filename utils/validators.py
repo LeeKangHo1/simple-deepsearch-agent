@@ -12,6 +12,7 @@ from typing import Dict, Any, List, Optional, Union, Tuple
 import logging
 from datetime import datetime
 import json
+from enum import Enum
 
 from models.data_models import Document, SearchEngine, DocumentType
 from .text_processing import clean_text, is_valid_text
@@ -132,18 +133,18 @@ def validate_search_query(query: str) -> Tuple[bool, str]:
 def validate_document(doc: Union[Document, Dict[str, Any]]) -> Tuple[bool, List[str]]:
     """
     문서 객체의 유효성을 검증합니다.
-    
+
     웹 검색 결과로 받은 문서가 처리할 가치가 있는지 판단하고,
     필수 필드와 데이터 품질을 확인합니다.
-    
+
     Args:
         doc: 검증할 문서 (Document 객체 또는 딕셔너리)
-        
+
     Returns:
         Tuple[bool, List[str]]: (유효성 여부, 오류 메시지 리스트)
     """
     errors = []
-    
+
     # Document 객체인 경우 딕셔너리로 변환
     if isinstance(doc, Document):
         doc_dict = doc.to_dict()
@@ -151,59 +152,58 @@ def validate_document(doc: Union[Document, Dict[str, Any]]) -> Tuple[bool, List[
         doc_dict = doc
     else:
         return False, ["문서가 올바른 형식이 아닙니다."]
-    
+
     # 필수 필드 확인
     required_fields = ['title', 'url', 'content']
     for field in required_fields:
         if field not in doc_dict or not doc_dict[field]:
             errors.append(f"필수 필드 '{field}'가 없습니다.")
-    
+
     if errors:
         return False, errors
-    
+
     # 제목 검증
     title = doc_dict['title'].strip()
     if len(title) < 3:
         errors.append("제목이 너무 짧습니다. (최소 3자)")
     elif len(title) > 500:
         errors.append("제목이 너무 깁니다. (최대 500자)")
-    
+
     # URL 검증
     url = doc_dict['url'].strip()
     if not is_valid_url(url):
         errors.append("URL이 유효하지 않습니다.")
-    
+
     # 내용 검증
     content = doc_dict['content'].strip()
     if not is_valid_text(content, min_length=50):
         errors.append("문서 내용이 너무 짧거나 유효하지 않습니다. (최소 50자)")
     elif len(content) > 50000:
         errors.append("문서 내용이 너무 깁니다. (최대 50,000자)")
-    
-    # 중복 문자 패턴 확인 (저품질 컨텐츠 탐지)
+
+    # 중복 문장 패턴 확인
     if len(content) > 100:
-        # 같은 문장이 반복되는지 확인
         sentences = content.split('.')
         if len(sentences) > 5:
             unique_sentences = set(s.strip().lower() for s in sentences if len(s.strip()) > 10)
-            if len(unique_sentences) < len(sentences) * 0.7:  # 70% 이상이 고유해야 함
+            if len(unique_sentences) < len(sentences) * 0.7:
                 errors.append("문서에 반복되는 내용이 너무 많습니다.")
-    
-    # 소스 검증
-    if 'source' in doc_dict:
-        source = doc_dict['source']
-        if isinstance(source, str):
-            valid_sources = [e.value for e in SearchEngine]
-            if source not in valid_sources:
-                errors.append(f"유효하지 않은 검색 엔진: {source}")
-    
+
+    # source 검증 (문자열이어야 함)
+    source = doc_dict.get('source', '')
+    if isinstance(source, Enum):
+        source = source.value
+    if source not in [e.value for e in SearchEngine]:
+        errors.append(f"유효하지 않은 검색 엔진: {source}")
+
     # 관련성 점수 검증
     if 'relevance_score' in doc_dict:
         score = doc_dict['relevance_score']
         if not isinstance(score, (int, float)) or not (0.0 <= score <= 1.0):
             errors.append("관련성 점수는 0.0~1.0 사이의 숫자여야 합니다.")
-    
+
     return len(errors) == 0, errors
+
 
 def validate_response_structure(response: str) -> Tuple[bool, List[str]]:
     """

@@ -227,10 +227,10 @@ class Document:
     def to_dict(self) -> Dict[str, Any]:
         """
         Document 객체를 딕셔너리로 변환
-        
+
         JSON 직렬화나 State 객체에 저장할 때 사용.
         모든 필드를 문자열 또는 기본 타입으로 변환합니다.
-        
+
         Returns:
             Dict[str, Any]: 딕셔너리 형태의 문서 정보
         """
@@ -238,15 +238,16 @@ class Document:
             "title": self.title,
             "url": self.url,
             "content": self.content,
-            "source": self.source.value,
+            "source": self.source.value if isinstance(self.source, Enum) else str(self.source),
             "relevance_score": self.relevance_score,
-            "doc_type": self.doc_type.value,
+            "doc_type": self.doc_type.value if isinstance(self.doc_type, Enum) else str(self.doc_type),
             "snippet": self.snippet,
             "published_date": self.published_date.isoformat() if self.published_date else None,
             "created_at": self.created_at.isoformat(),
             "content_hash": self.content_hash,
             "url_domain": self.url_domain
         }
+
     
     @classmethod
     def from_search_result(cls, result: Dict[str, Any], source: SearchEngine) -> 'Document':
