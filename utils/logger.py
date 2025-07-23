@@ -17,6 +17,7 @@ from datetime import datetime
 
 from config.settings import settings
 
+
 class ColoredFormatter(logging.Formatter):
     """
     콘솔 출력용 컬러 포맷터

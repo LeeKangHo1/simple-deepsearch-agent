@@ -23,7 +23,7 @@ import re
 
 # LangChain imports
 from langchain_core.prompts import PromptTemplate, ChatPromptTemplate
-from langchain_core.output_parsers import JsonOutputParser, StrOutputParser, ListOutputParser
+from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
 from langchain_core.exceptions import OutputParserException
 from langchain_core.language_models import BaseChatModel
 
@@ -114,7 +114,7 @@ class LLMService:
         # 출력 파서들 초기화
         self.json_parser = JsonOutputParser()
         self.str_parser = StrOutputParser()
-        self.list_parser = ListOutputParser()
+        self.list_parser = StrOutputParser()
     
     async def generate_sub_queries(self, user_question: str, num_queries: int = 4) -> LLMResponse:
         """

@@ -48,7 +48,69 @@ class DocumentType(Enum):
     ACADEMIC = "academic"
     REPORT = "report"
     OTHER = "other"
+# models/data_models.py에 추가할 SearchResult 클래스
 
+@dataclass
+class SearchResult:
+    """
+    검색 엔진으로부터 받은 개별 검색 결과
+    
+    SearchService에서 반환되는 원시 검색 결과를 표현합니다.
+    Document 클래스로 변환되기 전의 중간 데이터 구조입니다.
+    """
+    title: str                          # 검색 결과 제목
+    url: str                           # 검색 결과 URL
+    content: str                       # 검색 결과 내용/스니펫
+    engine: str                        # 검색 엔진 이름 (duckduckgo, tavily)
+    score: Optional[float] = None      # 검색 엔진에서 제공하는 관련성 점수
+    published_date: Optional[str] = None  # 게시 날짜 (가능한 경우)
+    
+    def __post_init__(self):
+        """초기화 후 검증"""
+        if not self.title or not self.url:
+            raise ValueError("제목과 URL은 필수입니다.")
+        
+        if not self.content:
+            self.content = ""
+        
+        # URL 정규화
+        self.url = self.url.strip()
+        if not self.url.startswith(('http://', 'https://')):
+            if not self.url.startswith('//'):
+                self.url = 'https://' + self.url
+            else:
+                self.url = 'https:' + self.url
+    
+    def to_document(self, query: str = None) -> 'Document':
+        """
+        SearchResult를 Document로 변환
+        
+        Args:
+            query: 검색에 사용된 쿼리 (메타데이터에 포함)
+            
+        Returns:
+            Document: 변환된 Document 객체
+        """
+        metadata = {
+            "search_engine": self.engine,
+            "relevance_score": self.score or 0.0,
+            "content_length": len(self.content) if self.content else 0
+        }
+        
+        if query:
+            metadata["query"] = query
+        
+        if self.published_date:
+            metadata["published_date"] = self.published_date
+        
+        return Document(
+            title=self.title,
+            url=self.url,
+            content=self.content,
+            source=self.engine,
+            metadata=metadata
+        )
+    
 @dataclass
 class SearchQuery:
     """
