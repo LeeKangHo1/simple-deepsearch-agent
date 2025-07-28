@@ -1,12 +1,14 @@
 # agents/web_search.py
 """
-웹 검색 에이전트
+웹 검색 에이전트 (재시도 로직 포함)
 
 여러 검색 엔진을 병렬로 활용하여 하위 쿼리들에 대한 문서를 수집하고,
 벡터 DB를 통한 중복 제거 및 관련성 정렬을 수행하는 에이전트입니다.
 
 주요 기능:
 - DuckDuckGo + Tavily 병렬 검색 실행
+- 검증 실패 시 다른 관점의 쿼리로 재검색
+- 기존 결과와 새 결과 병합
 - 벡터 DB 기반 중복 제거 (URL + 내용 유사도)
 - 사용자 질문과의 의미적 유사도 기반 정렬
 - 검색 결과 품질 검증 및 필터링
@@ -16,16 +18,18 @@
 import logging
 import asyncio
 import time
+import json
 from typing import List, Dict, Any, Optional, Tuple, Set
 from collections import defaultdict
 import hashlib
 
 # 프로젝트 모듈들
 from models.state import ResearchState, StateManager
-from models.data_models import Document, SearchQuery, SearchResult
+from models.data_models import Document, SearchQuery, SearchResult, remove_duplicate_documents
 from services.search_service import get_search_service, SearchService
 from services.vector_db import get_vector_db_service, VectorDBService
-from utils.validators import validate_search_query, validate_document, sanitize_input
+from services.llm_service import get_llm_service
+from utils.validators import validate_search_query, validate_document, sanitize_input, validate_query_list
 from utils.logger import get_agent_logger, log_agent_start, log_agent_end
 from utils.text_processing import extract_keywords, calculate_text_similarity
 
@@ -33,17 +37,11 @@ logger = get_agent_logger("web_search")
 
 class WebSearchAgent:
     """
-    웹 검색 에이전트 클래스
+    웹 검색 에이전트 클래스 (재시도 로직 포함)
     
     여러 검색 엔진을 활용하여 효율적이고 포괄적인 문서 수집을 담당합니다.
-    벡터 DB를 통한 지능적 중복 제거와 관련성 기반 정렬을 제공합니다.
-    
-    사용 예시:
-        agent = WebSearchAgent()
-        results = await agent.search_multiple_queries(
-            ["오픈소스 LLM", "Meta LLaMA"], 
-            original_question="LLM 동향"
-        )
+    벡터 DB를 통한 지능적 중복 제거와 관련성 기반 정렬을 제공하며,
+    검증 실패 시 다른 관점의 쿼리로 재검색하는 기능을 포함합니다.
     """
     
     def __init__(self, 
@@ -74,11 +72,228 @@ class WebSearchAgent:
         self.total_documents_after_dedup = 0
         self.avg_search_time = 0.0
         self.search_engine_stats = defaultdict(int)
+        self.retry_stats = {"total_retries": 0, "successful_retries": 0}
         
         logger.info(f"웹 검색 에이전트 초기화 완료 "
                    f"(쿼리당 최대 {max_results_per_query}개, "
                    f"전체 최대 {max_total_results}개, "
                    f"유사도 임계값 {similarity_threshold})")
+    
+    async def process_state(self, state: ResearchState) -> ResearchState:
+        """
+        LangGraph 워크플로우용 상태 처리 메서드 (재시도 로직 포함)
+        
+        Args:
+            state: 현재 연구 상태
+            
+        Returns:
+            ResearchState: 검색 결과가 추가된 상태
+        """
+        log_agent_start("web_search", {"retry_count": state.get("retry_count", 0)})
+        
+        # 재시도 여부 확인
+        retry_count = state.get("retry_count", 0)
+        is_retry = retry_count > 0
+        
+        # 진행 상태 업데이트
+        if is_retry:
+            new_state = StateManager.set_step(
+                state, 
+                "searching", 
+                f"검증 피드백을 바탕으로 추가 검색을 수행 중... (재시도 {retry_count}회)"
+            )
+        else:
+            new_state = StateManager.set_step(
+                state, 
+                "searching", 
+                "웹 검색을 통해 관련 문서를 수집 중..."
+            )
+        
+        try:
+            if is_retry:
+                # 재시도: 새로운 관점의 쿼리로 추가 검색
+                documents = await self._handle_retry_search(state)
+            else:
+                # 초기 검색: 기존 로직
+                documents = await self._handle_initial_search(state)
+            
+            # 상태에 결과 저장
+            new_state = new_state.copy()
+            new_state["documents"] = [doc.to_dict() for doc in documents]
+            
+            # 성공 로그 추가
+            if is_retry:
+                new_state = StateManager.add_log(
+                    new_state, 
+                    f"✅ 추가 검색 완료: 총 {len(documents)}개 문서 (기존 + 새 검색 결과)"
+                )
+                self.retry_stats["successful_retries"] += 1
+            else:
+                new_state = StateManager.add_log(
+                    new_state, 
+                    f"✅ 웹 검색 완료: {len(documents)}개 관련 문서 수집"
+                )
+            
+            # 검색 엔진별 통계 로그 추가
+            stats_msg = self._get_search_stats_message()
+            new_state = StateManager.add_log(new_state, stats_msg)
+            
+            log_agent_end("web_search", success=True, 
+                         output_data={"document_count": len(documents), "is_retry": is_retry})
+            
+            logger.info(f"상태 처리 완료: {len(documents)}개 문서를 상태에 저장 (재시도: {is_retry})")
+            return new_state
+            
+        except Exception as e:
+            # 오류 상태 설정
+            error_msg = f"웹 검색 실패 ({'재시도' if is_retry else '초기검색'}): {e}"
+            error_state = StateManager.set_error(new_state, error_msg)
+            
+            log_agent_end("web_search", success=False, error=str(e))
+            logger.error(f"상태 처리 실패: {e}")
+            return error_state
+    
+    async def _handle_initial_search(self, state: ResearchState) -> List[Document]:
+        """
+        초기 검색 처리
+        
+        Args:
+            state: 연구 상태
+            
+        Returns:
+            List[Document]: 검색된 문서 리스트
+        """
+        # 하위 쿼리 확인
+        sub_queries = state.get("sub_queries", [])
+        if not sub_queries:
+            raise ValueError("검색할 하위 쿼리가 없습니다. 질문 분석을 먼저 수행해주세요.")
+        
+        user_input = state.get("user_input", "")
+        
+        logger.info(f"초기 웹 검색 시작: {len(sub_queries)}개 쿼리")
+        
+        # 웹 검색 수행
+        documents = await self.search_multiple_queries(sub_queries, user_input)
+        
+        return documents
+    
+    async def _handle_retry_search(self, state: ResearchState) -> List[Document]:
+        """
+        재시도 검색 처리 (새로운 관점의 쿼리 + 기존 결과 병합)
+        
+        Args:
+            state: 연구 상태
+            
+        Returns:
+            List[Document]: 기존 + 새 검색 결과가 병합된 문서 리스트
+        """
+        self.retry_stats["total_retries"] += 1
+        
+        # 기존 데이터 가져오기
+        user_input = state.get("user_input", "")
+        existing_queries = state.get("sub_queries", [])
+        validation_feedback = state.get("validation_feedback", "")
+        existing_documents_data = state.get("documents", [])
+        
+        logger.info(f"재시도 검색 시작: {len(existing_documents_data)}개 기존 문서")
+        
+        # 기존 문서를 Document 객체로 변환
+        existing_documents = []
+        for doc_data in existing_documents_data:
+            try:
+                doc = Document(
+                    title=doc_data.get("title", ""),
+                    url=doc_data.get("url", ""),
+                    content=doc_data.get("content", ""),
+                    source=doc_data.get("source", "unknown"),
+                    relevance_score=doc_data.get("relevance_score", 0.0)
+                )
+                existing_documents.append(doc)
+            except Exception as e:
+                logger.warning(f"기존 문서 변환 실패: {e}")
+                continue
+        
+        # 1단계: LLM으로 새로운 관점의 쿼리 생성
+        new_queries = await self._generate_retry_queries(
+            user_input, existing_queries, validation_feedback
+        )
+        
+        if not new_queries:
+            logger.warning("새로운 쿼리 생성 실패, 기존 문서 반환")
+            return existing_documents
+        
+        logger.info(f"새로운 관점의 쿼리 {len(new_queries)}개 생성: {new_queries}")
+        
+        # 2단계: 새 쿼리로 검색 수행
+        new_documents = await self.search_multiple_queries(new_queries, user_input)
+        
+        logger.info(f"새 검색 결과: {len(new_documents)}개 문서")
+        
+        # 3단계: 기존 + 새 문서 병합 및 중복 제거
+        all_documents = existing_documents + new_documents
+        merged_documents = remove_duplicate_documents(all_documents, threshold=self.similarity_threshold)
+        
+        logger.info(f"문서 병합 완료: {len(existing_documents)} + {len(new_documents)} → {len(merged_documents)}개")
+        
+        # 4단계: 상태에 새 쿼리도 추가 (추적용)
+        # Note: 이 부분은 상위에서 처리하거나 별도 필드로 관리 필요
+        
+        return merged_documents
+    
+    async def _generate_retry_queries(self, 
+                                    user_question: str, 
+                                    existing_queries: List[str], 
+                                    validation_feedback: str) -> List[str]:
+        """
+        검증 피드백을 바탕으로 새로운 관점의 검색 쿼리 생성
+        
+        Args:
+            user_question: 사용자 원본 질문
+            existing_queries: 기존 검색 쿼리들
+            validation_feedback: 검증 에이전트 피드백
+            
+        Returns:
+            List[str]: 새로운 관점의 검색 쿼리 리스트
+        """
+        try:
+            logger.debug("LLM을 통한 재시도 쿼리 생성 시작")
+            
+            llm_service = get_llm_service()
+            
+            # LLM으로 새로운 관점의 쿼리 생성
+            response = await llm_service.generate_retry_queries(
+                user_question=user_question,
+                existing_queries=existing_queries,
+                validation_feedback=validation_feedback
+            )
+            
+            if not response.success:
+                logger.error(f"재시도 쿼리 생성 실패: {response.error_message}")
+                return []
+            
+            # 응답 파싱
+            try:
+                new_queries = json.loads(response.content)
+                if not isinstance(new_queries, list):
+                    logger.error("재시도 쿼리 응답이 리스트가 아님")
+                    return []
+                
+                # 쿼리 검증 및 정제
+                validated_queries, removed_count = validate_query_list(new_queries)
+                
+                if removed_count > 0:
+                    logger.debug(f"재시도 쿼리 검증: {removed_count}개 제거됨")
+                
+                logger.info(f"재시도 쿼리 생성 완료: {len(validated_queries)}개")
+                return validated_queries
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"재시도 쿼리 JSON 파싱 실패: {e}")
+                return []
+                
+        except Exception as e:
+            logger.error(f"재시도 쿼리 생성 중 오류: {e}")
+            return []
     
     async def search_multiple_queries(self, 
                                     queries: List[str], 
@@ -99,7 +314,6 @@ class WebSearchAgent:
             ValueError: 쿼리가 유효하지 않은 경우
             Exception: 검색 실패 등 기타 오류
         """
-        log_agent_start("web_search", {"queries": queries, "count": len(queries)})
         start_time = time.time()
         
         try:
@@ -135,9 +349,6 @@ class WebSearchAgent:
             processing_time = time.time() - start_time
             self._update_statistics(len(queries), len(raw_results), len(final_results), processing_time)
             
-            log_agent_end("web_search", success=True, 
-                         output_data={"final_count": len(final_results), "processing_time": processing_time})
-            
             logger.info(f"웹 검색 완료: {len(final_results)}개 최종 문서 ({processing_time:.2f}초)")
             return final_results
             
@@ -145,61 +356,8 @@ class WebSearchAgent:
             processing_time = time.time() - start_time
             self._update_statistics(len(queries) if queries else 0, 0, 0, processing_time)
             
-            log_agent_end("web_search", success=False, error=str(e))
             logger.error(f"웹 검색 실패 ({processing_time:.2f}초): {e}")
             raise
-    
-    async def process_state(self, state: ResearchState) -> ResearchState:
-        """
-        LangGraph 워크플로우용 상태 처리 메서드
-        
-        Args:
-            state: 현재 연구 상태
-            
-        Returns:
-            ResearchState: 검색 결과가 추가된 상태
-        """
-        # 진행 상태 업데이트
-        new_state = StateManager.set_step(
-            state, 
-            "searching", 
-            "웹 검색을 통해 관련 문서를 수집 중..."
-        )
-        
-        try:
-            # 하위 쿼리 확인
-            sub_queries = state.get("sub_queries", [])
-            if not sub_queries:
-                raise ValueError("검색할 하위 쿼리가 없습니다. 질문 분석을 먼저 수행해주세요.")
-            
-            user_input = state.get("user_input", "")
-            
-            # 웹 검색 수행
-            logger.info(f"상태 기반 웹 검색 시작: {len(sub_queries)}개 쿼리")
-            documents = await self.search_multiple_queries(sub_queries, user_input)
-            
-            # 상태에 결과 저장
-            new_state = new_state.copy()
-            new_state["documents"] = documents
-            
-            # 성공 로그 추가
-            new_state = StateManager.add_log(
-                new_state, 
-                f"✅ 웹 검색 완료: {len(documents)}개 관련 문서 수집"
-            )
-            
-            # 검색 엔진별 통계 로그 추가
-            stats_msg = self._get_search_stats_message()
-            new_state = StateManager.add_log(new_state, stats_msg)
-            
-            logger.info(f"상태 처리 완료: {len(documents)}개 문서를 상태에 저장")
-            return new_state
-            
-        except Exception as e:
-            # 오류 상태 설정
-            error_state = StateManager.set_error(new_state, f"웹 검색 실패: {e}")
-            logger.error(f"상태 처리 실패: {e}")
-            return error_state
     
     def _validate_and_prepare_queries(self, queries: List[str]) -> List[str]:
         """
@@ -225,10 +383,11 @@ class WebSearchAgent:
             cleaned_query = sanitize_input(query.strip(), max_length=200)
             
             # 쿼리 검증
-            if validate_search_query(cleaned_query):
+            is_valid, error_msg = validate_search_query(cleaned_query)
+            if is_valid:
                 validated_queries.append(cleaned_query)
             else:
-                logger.warning(f"검증 실패 쿼리 스킵: '{cleaned_query}'")
+                logger.warning(f"검증 실패 쿼리 스킵: '{cleaned_query}' - {error_msg}")
         
         logger.debug(f"쿼리 검증 완료: {len(queries)}개 → {len(validated_queries)}개")
         return validated_queries
@@ -290,7 +449,7 @@ class WebSearchAgent:
         
         try:
             # SearchService를 통한 통합 검색 (DuckDuckGo + Tavily)
-            search_results: List[SearchResult] = await self.search_service.search_all_engines(
+            search_results = await self.search_service.search_all_engines(
                 query=query,
                 max_results=self.max_results_per_query
             )
@@ -380,8 +539,10 @@ class WebSearchAgent:
         for doc in documents:
             try:
                 # 문서 유효성 검증
-                if not validate_document(doc):
+                is_valid, errors = validate_document(doc)
+                if not is_valid:
                     filtered_count += 1
+                    logger.debug(f"문서 검증 실패: {errors}")
                     continue
                 
                 # URL 기반 기본 중복 제거
@@ -480,12 +641,8 @@ class WebSearchAgent:
         try:
             logger.debug(f"벡터 DB 중복 제거 시작: {len(documents)}개 문서")
             
-            # VectorDBService를 통한 중복 제거
-            deduplicated_docs = await self.vector_db.add_documents_with_deduplication(
-                documents=documents,
-                similarity_threshold=self.similarity_threshold,
-                collection_name="web_search_temp"  # 임시 컬렉션 사용
-            )
+            # 단순한 중복 제거 사용 (벡터 DB 의존성 줄이기)
+            deduplicated_docs = remove_duplicate_documents(documents, threshold=self.similarity_threshold)
             
             removed_count = len(documents) - len(deduplicated_docs)
             if removed_count > 0:
@@ -494,7 +651,7 @@ class WebSearchAgent:
             return deduplicated_docs
             
         except Exception as e:
-            logger.warning(f"벡터 DB 중복 제거 실패, 원본 반환: {e}")
+            logger.warning(f"중복 제거 실패, 원본 반환: {e}")
             return documents
     
     async def _sort_by_relevance(self, documents: List[Document], original_question: str) -> List[Document]:
@@ -514,14 +671,28 @@ class WebSearchAgent:
         try:
             logger.debug(f"관련성 기반 정렬 시작: {len(documents)}개 문서")
             
-            # VectorDBService의 유사도 검색 활용
-            sorted_docs = await self.vector_db.search_similar_documents(
-                query_text=original_question,
-                collection_name="web_search_temp",
-                top_k=len(documents)  # 모든 문서 반환하되 관련성 순 정렬
-            )
+            # 키워드 기반 간단한 관련성 계산
+            question_keywords = set(extract_keywords(original_question, max_keywords=10))
             
-            logger.debug(f"관련성 정렬 완료: 상위 {len(sorted_docs)}개 문서")
+            for doc in documents:
+                # 제목과 내용에서 키워드 추출
+                title_keywords = set(extract_keywords(doc.title, max_keywords=5))
+                content_keywords = set(extract_keywords(doc.content[:500], max_keywords=10))  # 첫 500자만
+                doc_keywords = title_keywords | content_keywords
+                
+                # 키워드 일치도 계산 (제목 가중치 높게)
+                title_overlap = len(question_keywords & title_keywords)
+                content_overlap = len(question_keywords & content_keywords)
+                
+                # 관련성 점수 계산 (0.0 ~ 1.0)
+                title_score = title_overlap / max(len(question_keywords), 1) * 0.7
+                content_score = content_overlap / max(len(question_keywords), 1) * 0.3
+                doc.relevance_score = title_score + content_score
+            
+            # 관련성 점수 순으로 정렬
+            sorted_docs = sorted(documents, key=lambda x: x.relevance_score, reverse=True)
+            
+            logger.debug(f"관련성 정렬 완료: 상위 문서 점수 {sorted_docs[0].relevance_score:.3f}")
             return sorted_docs
             
         except Exception as e:
@@ -549,7 +720,9 @@ class WebSearchAgent:
         for engine, count in self.search_engine_stats.items():
             engine_stats.append(f"{engine}: {count}개")
         
-        return f"📊 검색 엔진별 결과: {', '.join(engine_stats)}"
+        retry_info = f"재시도: {self.retry_stats['total_retries']}회"
+        
+        return f"📊 검색 결과 - {', '.join(engine_stats)}, {retry_info}"
     
     def get_statistics(self) -> Dict[str, Any]:
         """
@@ -571,6 +744,7 @@ class WebSearchAgent:
             ),
             "avg_search_time": round(self.avg_search_time, 3),
             "search_engine_stats": dict(self.search_engine_stats),
+            "retry_stats": dict(self.retry_stats),
             "max_results_per_query": self.max_results_per_query,
             "max_total_results": self.max_total_results,
             "similarity_threshold": self.similarity_threshold,
@@ -584,7 +758,23 @@ class WebSearchAgent:
         self.total_documents_after_dedup = 0
         self.avg_search_time = 0.0
         self.search_engine_stats.clear()
+        self.retry_stats = {"total_retries": 0, "successful_retries": 0}
         logger.info("웹 검색 에이전트 통계 초기화됨")
+
+
+# LangGraph 노드 함수
+async def web_search_node(state: ResearchState) -> ResearchState:
+    """
+    LangGraph 워크플로우용 웹 검색 노드 함수
+    
+    Args:
+        state: 현재 연구 상태
+        
+    Returns:
+        ResearchState: 웹 검색 결과가 추가된 상태
+    """
+    web_search_agent = get_web_search_agent()
+    return await web_search_agent.process_state(state)
 
 
 # 전역 인스턴스 (싱글톤 패턴)
@@ -610,20 +800,3 @@ def reset_web_search_agent():
     global _web_search_agent_instance
     _web_search_agent_instance = None
     logger.info("웹 검색 에이전트 전역 인스턴스 리셋됨")
-
-
-# LangGraph 노드 함수 (워크플로우에서 직접 사용)
-async def web_search_node(state: ResearchState) -> ResearchState:
-    """
-    LangGraph 워크플로우용 웹 검색 노드 함수
-    
-    Args:
-        state: 현재 연구 상태
-        
-    Returns:
-        ResearchState: 검색 결과가 추가된 상태
-    """
-    agent = get_web_search_agent()
-    return await agent.process_state(state)
-
-

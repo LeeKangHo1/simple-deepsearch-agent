@@ -194,6 +194,61 @@ class LLMService:
             expected_type=str
         )
     
+    # services/llm_service.py
+    async def generate_retry_queries(
+        self, 
+        user_question: str, 
+        existing_queries: List[str], 
+        validation_feedback: str
+    ) -> LLMResponse:
+        """
+        검증 실패 시 다른 관점의 검색 쿼리 생성
+        
+        Args:
+            user_question: 사용자의 원본 질문
+            existing_queries: 기존에 사용된 검색 쿼리들
+            validation_feedback: 검증 에이전트의 피드백
+            
+        Returns:
+            LLMResponse: 새로운 관점의 검색 쿼리 리스트
+        """
+        existing_queries_text = "\n".join([f"- {query}" for query in existing_queries])
+        
+        prompt_template = ChatPromptTemplate.from_messages([
+            ("system", """당신은 검색 전략 전문가입니다. 기존 검색으로 부족했던 정보를 보완할 수 있는 새로운 관점의 검색 쿼리를 생성해주세요.
+
+    규칙:
+    1. 검증 피드백을 분석하여 부족한 정보 유형 파악
+    2. 기존 쿼리와 중복되지 않는 다른 각도의 접근
+    3. 더 구체적이고 세부적인 관점으로 쿼리 생성
+    4. 3-4개의 새로운 검색 쿼리를 JSON 배열로 반환
+
+    예시:
+    기존: ["AI 트렌드", "머신러닝 동향"]
+    새관점: ["AI 기업 투자 현황", "AI 개발자 채용 동향", "AI 규제 정책 변화"]"""),
+            ("user", """원본 질문: {question}
+
+    기존 검색 쿼리:
+    {existing_queries}
+
+    검증 피드백: {feedback}
+
+    위 피드백을 바탕으로 부족한 정보를 보완할 수 있는 새로운 관점의 검색 쿼리를 생성해주세요.""")
+        ])
+        
+        return await self._call_llm(
+            prompt_template=prompt_template,
+            input_variables={
+                "question": user_question,
+                "existing_queries": existing_queries_text,
+                "feedback": validation_feedback
+            },
+            agent_type="question_analyzer",
+            output_parser=self.list_parser,
+            expected_type=list
+        )
+    
+    
     async def generate_insights(self, summaries: List[str], user_question: str) -> LLMResponse:
         """
         문서 요약들로부터 인사이트 생성
@@ -339,6 +394,7 @@ class LLMService:
             expected_type=dict
         )
     
+    
     async def _call_llm(
         self, 
         prompt_template: ChatPromptTemplate,
@@ -479,3 +535,5 @@ def reset_llm_service():
     global _llm_service_instance
     _llm_service_instance = None
     logger.info("LLM service instance reset")
+
+
