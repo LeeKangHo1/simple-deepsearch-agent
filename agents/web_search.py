@@ -45,10 +45,10 @@ class WebSearchAgent:
     """
     
     def __init__(self, 
-                 max_results_per_query: int = 5,
-                 max_total_results: int = 15,
+                 max_results_per_query: int = 3,  # 5 → 3으로 축소
+                 max_total_results: int = 10,     # 15 → 10으로 축소
                  similarity_threshold: float = 0.85,
-                 enable_content_similarity: bool = True):
+                 enable_content_similarity: bool = False):  # 중복 제거 비활성화로 속도 향상
         """
         웹 검색 에이전트 초기화
         
@@ -117,9 +117,12 @@ class WebSearchAgent:
                 # 초기 검색: 기존 로직
                 documents = await self._handle_initial_search(state)
             
-            # 상태에 결과 저장
+            # 상태에 결과 저장 (빈 리스트도 허용)
             new_state = new_state.copy()
-            new_state["documents"] = [doc.to_dict() for doc in documents]
+            if documents:
+                new_state["documents"] = [doc.to_dict() for doc in documents]
+            else:
+                new_state["documents"] = []
             
             # 성공 로그 추가
             if is_retry:
@@ -166,7 +169,8 @@ class WebSearchAgent:
         # 하위 쿼리 확인
         sub_queries = state.get("sub_queries", [])
         if not sub_queries:
-            raise ValueError("검색할 하위 쿼리가 없습니다. 질문 분석을 먼저 수행해주세요.")
+            logger.warning("검색할 하위 쿼리가 없습니다. 빈 결과를 반환합니다.")
+            return []
         
         user_input = state.get("user_input", "")
         
@@ -332,15 +336,12 @@ class WebSearchAgent:
             valid_documents = self._validate_and_filter_documents(raw_results)
             logger.debug(f"검증된 문서: {len(valid_documents)}개")
             
-            # 4단계: 벡터 DB 기반 중복 제거
-            deduplicated_docs = await self._remove_duplicates_with_vector_db(valid_documents)
+            # 4단계: 간단한 중복 제거 (URL 기반만)
+            deduplicated_docs = self._simple_deduplication(valid_documents)
             logger.debug(f"중복 제거 후: {len(deduplicated_docs)}개")
             
-            # 5단계: 관련성 기반 정렬
-            if original_question:
-                sorted_docs = await self._sort_by_relevance(deduplicated_docs, original_question)
-            else:
-                sorted_docs = deduplicated_docs
+            # 5단계: 관련성 정렬 생략 (속도 향상)
+            sorted_docs = deduplicated_docs
             
             # 6단계: 최대 개수 제한
             final_results = sorted_docs[:self.max_total_results]
@@ -454,27 +455,23 @@ class WebSearchAgent:
                 max_results=self.max_results_per_query
             )
             
-            # SearchResult를 Document로 변환
-            for result in search_results:
+            # SearchService에서 이미 Document 객체를 반환하므로 그대로 사용
+            for document in search_results:
                 try:
-                    document = Document(
-                        title=result.title,
-                        url=result.url,
-                        content=result.content,
-                        source=result.engine,  # 검색 엔진 정보
-                        metadata={
-                            "query": query,
-                            "search_engine": result.engine,
-                            "relevance_score": getattr(result, 'score', 0.0),
-                            "published_date": getattr(result, 'published_date', None),
-                            "content_length": len(result.content) if result.content else 0
-                        }
-                    )
+                    # 메타데이터에 쿼리 정보 추가
+                    if not hasattr(document, 'metadata') or document.metadata is None:
+                        document.metadata = {}
+                    
+                    document.metadata.update({
+                        "query": query,
+                        "content_length": len(document.content) if document.content else 0
+                    })
                     
                     documents.append(document)
                     
-                    # 검색 엔진별 통계 업데이트
-                    self.search_engine_stats[result.engine] += 1
+                    # 검색 엔진별 통계 업데이트 (source는 SearchEngine enum)
+                    engine_name = document.source.value if hasattr(document.source, 'value') else str(document.source)
+                    self.search_engine_stats[engine_name] += 1
                     
                 except Exception as e:
                     logger.warning(f"문서 변환 실패 (쿼리: {query}): {e}")
@@ -575,6 +572,26 @@ class WebSearchAgent:
                     f"(필터링됨: {filtered_count}개)")
         
         return valid_documents
+    
+    def _simple_deduplication(self, documents: List[Document]) -> List[Document]:
+        """
+        간단한 URL 기반 중복 제거 (속도 최적화)
+        
+        Args:
+            documents: 중복 제거할 문서 리스트
+            
+        Returns:
+            List[Document]: 중복 제거된 문서 리스트
+        """
+        seen_urls = set()
+        unique_docs = []
+        
+        for doc in documents:
+            if doc.url not in seen_urls:
+                seen_urls.add(doc.url)
+                unique_docs.append(doc)
+        
+        return unique_docs
     
     def _is_low_quality_content(self, content: str) -> bool:
         """

@@ -224,6 +224,27 @@ class Document:
         except:
             return "unknown"
     
+    @classmethod
+    def from_search_result(cls, result: Dict[str, Any], source: SearchEngine) -> 'Document':
+        """
+        검색 결과 딕셔너리로부터 Document 객체 생성
+        
+        Args:
+            result: 정규화된 검색 결과 딕셔너리
+            source: 검색 엔진 타입
+            
+        Returns:
+            Document: 생성된 Document 객체
+        """
+        return cls(
+            title=result.get('title', ''),
+            url=result.get('url', ''),
+            content=result.get('content', ''),
+            source=source,
+            snippet=result.get('snippet', result.get('content', '')[:200]),
+            published_date=None  # 추후 파싱 로직 추가 가능
+        )
+    
     def to_dict(self) -> Dict[str, Any]:
         """
         Document 객체를 딕셔너리로 변환

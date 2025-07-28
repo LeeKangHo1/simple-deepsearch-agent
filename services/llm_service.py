@@ -434,13 +434,27 @@ class LLMService:
                 # LLM 호출 실행
                 result = await chain.ainvoke(input_variables)
                 
-                # 응답 타입 검증
+                # 응답 타입 검증 및 변환
                 if not isinstance(result, expected_type):
-                    if attempt < max_retries - 1:
+                    if expected_type == list and isinstance(result, str):
+                        # 문자열을 리스트로 변환 시도
+                        try:
+                            # JSON 파싱 시도
+                            import json
+                            parsed_result = json.loads(result)
+                            if isinstance(parsed_result, list):
+                                result = parsed_result
+                            else:
+                                # JSON이 리스트가 아니면 줄바꿈으로 분리
+                                result = [line.strip() for line in result.split('\n') if line.strip()]
+                        except:
+                            # JSON 파싱 실패 시 줄바꿈으로 분리
+                            result = [line.strip() for line in result.split('\n') if line.strip()]
+                    elif attempt < max_retries - 1:
                         logger.warning(f"Unexpected response type. Expected {expected_type}, got {type(result)}. Retrying...")
                         continue
                     else:
-                        # 마지막 시도에서도 실패하면 문자열로 변환
+                        # 마지막 시도에서도 실패하면 기본 변환
                         result = str(result) if expected_type == str else result
                 
                 # 성공 응답 생성

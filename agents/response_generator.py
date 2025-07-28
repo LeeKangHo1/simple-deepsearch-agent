@@ -92,8 +92,8 @@ class ResponseGenerator:
             ResearchResponse: 생성된 응답 객체
         """
         if not insights:
-            logger.warning("응답 생성할 인사이트가 없습니다.")
-            return self._create_empty_response()
+            logger.warning("응답 생성할 인사이트가 없습니다. 기본 응답을 생성합니다.")
+            return self._create_fallback_response(user_question)
         
         agent_logger.start_step(f"응답 생성 시작 ({len(insights)}개 인사이트)")
         
@@ -155,12 +155,16 @@ class ResponseGenerator:
         sources = []
         seen_domains = set()
         
-        for doc in documents:
+        for i, doc in enumerate(documents):
             try:
                 title = doc.get("title", "").strip()
                 url = doc.get("url", "").strip()
                 
+                # 디버깅을 위한 로깅 추가
+                logger.info(f"Document {i+1}: title='{title[:50]}...', url='{url}'")
+                
                 if not title or not url:
+                    logger.warning(f"Document {i+1} missing title or URL: title='{title}', url='{url}'")
                     continue
                 
                 # 도메인 추출
@@ -168,6 +172,7 @@ class ResponseGenerator:
                 
                 # 중복 도메인 체크 (같은 사이트에서 여러 문서가 온 경우 대표 1개만)
                 if domain in seen_domains:
+                    logger.info(f"Skipping duplicate domain: {domain}")
                     continue
                 
                 seen_domains.add(domain)
@@ -241,9 +246,25 @@ class ResponseGenerator:
         # 요약 텍스트 생성
         summaries_text = "\n".join([f"• {summary}" for summary in summaries])
         
-        # 출처 도메인 리스트 생성
-        source_domains = [source["domain"] for source in sources_info]
-        sources_text = ", ".join(source_domains[:10])  # 최대 10개까지
+        # 출처 정보 리스트 생성 (제목 우선, 없으면 도메인)
+        source_displays = []
+        for source in sources_info[:8]:  # 최대 8개까지 (가독성 고려)
+            title = source.get("title", "").strip()
+            domain = source.get("domain", "").strip()
+            
+            # 제목이 있고 의미있는 경우 제목 사용, 아니면 도메인 사용
+            if title and len(title) > 5 and title != domain:
+                # 제목이 너무 길면 축약 (50자로 늘림)
+                if len(title) > 50:
+                    # 의미있는 부분만 추출 (앞부분 우선)
+                    display_text = title[:47] + "..."
+                else:
+                    display_text = title
+                source_displays.append(f'"{display_text}"')
+            else:
+                source_displays.append(domain)
+        
+        sources_text = ", ".join(source_displays)
         
         # 사용자 질문 기반 제목 힌트
         title_hint = user_question if user_question.strip() else "연구 결과"
@@ -526,6 +547,44 @@ class ResponseGenerator:
             insights_count=0,
             documents_used=0,
             word_count=0
+        )
+    
+    def _create_fallback_response(self, user_question: str) -> ResearchResponse:
+        """
+        검색 결과가 없을 때 기본 응답 생성
+        
+        Args:
+            user_question: 사용자 질문
+            
+        Returns:
+            ResearchResponse: 기본 응답 객체
+        """
+        fallback_content = f"""# {user_question}에 대한 답변
+
+## 죄송합니다
+현재 해당 주제에 대한 최신 정보를 검색하는 데 어려움이 있습니다.
+
+## 제안사항
+- 검색어를 더 구체적으로 입력해보세요
+- 다른 키워드로 다시 시도해보세요
+- 잠시 후 다시 시도해보세요
+
+## 일반적인 정보
+요청하신 주제에 대한 일반적인 정보는 다음과 같은 방법으로 찾아보실 수 있습니다:
+- 공식 문서나 웹사이트 확인
+- 관련 커뮤니티나 포럼 참조
+- 전문가 의견이나 리포트 검토
+
+---
+*검색 시간: {time.strftime("%Y-%m-%d %H:%M:%S")}*
+"""
+        
+        return ResearchResponse(
+            markdown_content=fallback_content,
+            sources=[],
+            insights_count=0,
+            documents_used=0,
+            word_count=len(fallback_content)
         )
     
     def get_processing_stats(self) -> Dict[str, Any]:

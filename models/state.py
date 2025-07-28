@@ -155,7 +155,8 @@ class StateManager:
         
         # 새로운 상태 반환 (불변성 유지)
         new_state = state.copy()
-        new_state["logs"] = state["logs"] + [log_entry]
+        existing_logs = state.get("logs", [])
+        new_state["logs"] = existing_logs + [log_entry]
         return new_state
     
     @staticmethod
@@ -173,7 +174,8 @@ class StateManager:
         """
         new_state = state.copy()
         new_state["current_step"] = step
-        new_state["step_timestamps"] = state["step_timestamps"].copy()
+        existing_timestamps = state.get("step_timestamps", {})
+        new_state["step_timestamps"] = existing_timestamps.copy()
         new_state["step_timestamps"][step] = time.time()
         
         if message:
@@ -212,7 +214,8 @@ class StateManager:
             ResearchState: 재시도 횟수가 증가된 상태
         """
         new_state = state.copy()
-        new_state["retry_count"] = state["retry_count"] + 1
+        current_retry_count = state.get("retry_count", 0)
+        new_state["retry_count"] = current_retry_count + 1
         
         return StateManager.add_log(
             new_state, 
@@ -231,7 +234,7 @@ class StateManager:
         Returns:
             float: 실행 시간 (초), 없으면 None
         """
-        timestamps = state["step_timestamps"]
+        timestamps = state.get("step_timestamps", {})
         step_keys = list(timestamps.keys())
         
         if step not in step_keys:
@@ -261,7 +264,7 @@ class StateManager:
         Returns:
             float: 총 실행 시간 (초)
         """
-        timestamps = state["step_timestamps"]
+        timestamps = state.get("step_timestamps", {})
         if not timestamps:
             return 0.0
         

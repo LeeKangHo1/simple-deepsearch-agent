@@ -91,11 +91,11 @@ class SearchService:
                 for query in queries
             }
             
-            # 완료된 검색 결과들을 수집
+            # 완료된 검색 결과들을 수집 (타임아웃 단축)
             for future in as_completed(future_to_query):
                 query = future_to_query[future]
                 try:
-                    documents = future.result(timeout=settings.REQUEST_TIMEOUT)
+                    documents = future.result(timeout=10)  # 30초 → 10초로 단축
                     all_documents.extend(documents)
                     logger.info(f"Search completed for '{query.query}' via {query.engine.value}: {len(documents)} documents")
                 except Exception as e:
@@ -106,29 +106,20 @@ class SearchService:
         
         return all_documents
     
-    async def search_all_engines(self, query: str, max_results: int = 5) -> List[Document]:
+    async def search_all_engines(self, query: str, max_results: int = 3) -> List[Document]:
         """
-        DuckDuckGo + Tavily를 사용하여 단일 쿼리에 대한 병렬 검색 수행
+        DuckDuckGo + Tavily를 사용하여 단일 쿼리에 대한 병렬 검색 수행 (최적화됨)
 
         Args:
             query (str): 검색어
-            max_results (int): 엔진별 최대 결과 수
+            max_results (int): 엔진별 최대 결과 수 (기본값 3으로 축소)
 
         Returns:
             List[Document]: 통합된 검색 결과 문서 리스트
         """
         search_queries = []
 
-        # Tavily가 가능한 경우 반반 배분
-        if self.tavily_client:
-            search_queries.append(SearchQuery(
-                query=query,
-                engine=SearchEngine.TAVILY,
-                max_results=max_results,
-                language="ko"
-            ))
-
-        # DuckDuckGo는 항상 포함
+        # 빠른 검색을 위해 DuckDuckGo만 사용 (Tavily는 느림)
         search_queries.append(SearchQuery(
             query=query,
             engine=SearchEngine.DUCKDUCKGO,
@@ -181,13 +172,13 @@ class SearchService:
             List[Document]: 검색 결과 문서 리스트
         """
         try:
-            # DuckDuckGo 검색 실행
+            # DuckDuckGo 검색 실행 (최적화)
             results = self.ddgs_client.text(
                 keywords=query.query,
-                max_results=query.max_results,
+                max_results=min(query.max_results, 3),  # 최대 3개로 제한
                 region=query.language,
                 safesearch='moderate',
-                timelimit='y'  # 최근 1년 이내 결과
+                timelimit=None  # 시간 제한 제거로 속도 향상
             )
             
             documents = []

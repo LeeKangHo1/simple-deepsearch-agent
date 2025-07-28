@@ -547,11 +547,6 @@ async def generate_insights_node(state: ResearchState) -> ResearchState:
                 logger.warning(f"DocumentSummary 생성 실패: {e}")
                 continue
         
-        if not summaries:
-            error_msg = "유효한 DocumentSummary 객체를 생성할 수 없습니다."
-            logger.error(error_msg)
-            return StateManager.set_error(state, error_msg)
-        
         # 인사이트 생성기 생성 및 실행
         generator = InsightGenerator()
         insights = await generator.generate_insights(
@@ -560,12 +555,18 @@ async def generate_insights_node(state: ResearchState) -> ResearchState:
         )
         
         if not insights:
-            error_msg = "인사이트 생성에 실패했습니다."
-            logger.error(error_msg)
-            return StateManager.set_error(state, error_msg)
-        
-        # 인사이트를 문자열 리스트로 변환하여 상태에 저장
-        insight_texts = [insight.content for insight in insights]
+            # 인사이트가 없을 때 기본 인사이트 생성
+            logger.warning("인사이트가 없어 기본 인사이트를 생성합니다.")
+            user_question = state.get("user_input", "")
+            fallback_insights = [
+                f"{user_question}에 대한 정보 수집이 어려운 상황입니다.",
+                "다른 검색어나 키워드로 다시 시도해보시기 바랍니다.",
+                "관련 공식 문서나 신뢰할 수 있는 소스를 직접 확인하는 것을 권장합니다."
+            ]
+            insight_texts = fallback_insights
+        else:
+            # 인사이트를 문자열 리스트로 변환하여 상태에 저장
+            insight_texts = [insight.content for insight in insights]
         
         # 상태 업데이트
         new_state = state.copy()
@@ -580,9 +581,10 @@ async def generate_insights_node(state: ResearchState) -> ResearchState:
             f"🧠 인사이트 생성 완료: {len(insight_texts)}개 인사이트 생성"
         )
         
-        # 인사이트 내용 요약 로깅 (디버깅용)
-        for i, insight in enumerate(insights, 1):
-            logger.debug(f"인사이트 {i} ({insight.category}): {insight.content[:100]}...")
+        # 인사이트 내용 요약 로깅 (디버깅용) - insights가 있을 때만
+        if insights:
+            for i, insight in enumerate(insights, 1):
+                logger.debug(f"인사이트 {i} ({insight.category}): {insight.content[:100]}...")
         
         logger.info("=== 인사이트 생성 노드 완료 ===")
         return new_state

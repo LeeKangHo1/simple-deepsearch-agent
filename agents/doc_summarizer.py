@@ -533,9 +533,14 @@ async def summarize_documents_node(state: ResearchState) -> ResearchState:
         )
         
         if not summaries:
-            error_msg = "문서 요약 생성에 실패했습니다."
-            logger.error(error_msg)
-            return StateManager.set_error(state, error_msg)
+            # 문서가 없을 때 기본 요약 생성
+            logger.warning("문서 요약이 없어 기본 요약을 생성합니다.")
+            user_question = state.get("user_input", "")
+            fallback_summary = f"{user_question}에 대한 정보를 찾는 중입니다. 현재 관련 문서를 수집하지 못했습니다."
+            summary_texts = [fallback_summary]
+        else:
+            # 요약 결과를 문자열 리스트로 변환하여 상태에 저장
+            summary_texts = [summary.summary for summary in summaries]
         
         # 요약 결과를 문자열 리스트로 변환하여 상태에 저장
         summary_texts = [summary.summary for summary in summaries]

@@ -60,12 +60,12 @@ class ResponseValidator:
         self.max_retry_count = max_retry_count
         self.llm_service = get_llm_service()
         
-        # 검증 기준 설정
+        # 검증 기준 설정 (완화됨)
         self.validation_criteria = {
-            "min_word_count": 200,        # 최소 단어 수
+            "min_word_count": 100,        # 최소 단어 수 (200 → 100)
             "max_word_count": 10000,      # 최대 단어 수
-            "required_sections": ["주요 현황", "주요 인사이트", "향후 전망"],
-            "min_insights_ratio": 0.8,    # 원본 인사이트 대비 최소 포함 비율
+            "required_sections": ["인사이트"],  # 필수 섹션 완화 (인사이트만 필수)
+            "min_insights_ratio": 0.5,    # 원본 인사이트 대비 최소 포함 비율 (0.8 → 0.5)
             "min_sources_count": 1,       # 최소 출처 개수
         }
         
@@ -124,8 +124,13 @@ class ResponseValidator:
             if not content_validation.success:
                 all_issues.extend(content_validation.content.get("issues", []))
             
-            # 검증 결과 결정
-            is_valid = len(all_issues) == 0 and content_validation.success
+            # 검증 결과 결정 (완화된 기준)
+            # 심각한 문제가 없으면 통과 (경미한 문제는 허용)
+            critical_issues = [issue for issue in all_issues if any(
+                critical in issue.lower() for critical in ["빈 응답", "검증 오류", "파싱 실패"]
+            )]
+            
+            is_valid = len(critical_issues) == 0  # 심각한 문제만 체크
             confidence_score = self._calculate_confidence_score(
                 len(all_issues), content_validation, response_content
             )

@@ -2,53 +2,54 @@
 """
 유틸리티 모듈 초기화
 
-공통으로 사용되는 유틸리티 함수들을 제공하는 패키지입니다.
-프로젝트 전반에서 사용되는 텍스트 처리, 로깅, 검증 함수들을 포함합니다.
+Deep Research Chatbot에서 사용되는 공통 유틸리티 함수들을 제공합니다.
 """
-
-from .logger import (
-    setup_logging,
-    get_logger,
-    log_execution_time
-)
 
 from .text_processing import (
     clean_text,
     extract_keywords,
     truncate_text,
-    normalize_whitespace,
-    remove_html_tags,
-    is_valid_text
+    is_valid_text,
+    calculate_text_similarity
 )
 
 from .validators import (
+    sanitize_input,
     validate_search_query,
     validate_document,
     validate_response_structure,
-    sanitize_input,
-    is_valid_url,
-    extract_domain
+    validate_query_list,
+    validate_insights
+)
+
+from .logger import (
+    setup_logging,
+    get_logger,
+    get_agent_logger,
+    log_execution_time,
+    create_agent_logger
 )
 
 __all__ = [
-    # logger
-    'setup_logging',
-    'get_logger', 
-    'log_execution_time',
-    
     # text_processing
     'clean_text',
-    'extract_keywords',
+    'extract_keywords', 
     'truncate_text',
-    'normalize_whitespace', 
-    'remove_html_tags',
     'is_valid_text',
+    'calculate_text_similarity',
     
     # validators
+    'sanitize_input',
     'validate_search_query',
     'validate_document',
     'validate_response_structure',
-    'sanitize_input',
-    'is_valid_url',
-    'extract_domain'
+    'validate_query_list',
+    'validate_insights',
+    
+    # logger
+    'setup_logging',
+    'get_logger',
+    'get_agent_logger',
+    'log_execution_time',
+    'create_agent_logger'
 ]
